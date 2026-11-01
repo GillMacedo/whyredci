@@ -1,0 +1,13 @@
+{
+  "name": "whyredci",
+  "version": "0.1.0",
+  "description": "Explain a failed GitHub Actions run: the failed step, the log lines that matter, and whether it looks new, already failing or flaky. Read-only.",
+  "author": {
+    "name": "Giulliano Macedo",
+    "url": "https://github.com/GillMacedo"
+  },
+  "homepage": "https://github.com/GillMacedo/whyredci",
+  "repository": "https://github.com/GillMacedo/whyredci",
+  "license": "MIT",
+  "keywords": ["github-actions", "ci", "ci-cd", "flaky-tests", "debugging", "devops"]
+}

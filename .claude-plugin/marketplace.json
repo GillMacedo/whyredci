@@ -1,0 +1,14 @@
+{
+  "name": "whyredci-marketplace",
+  "description": "Marketplace for whyredci, which explains failed GitHub Actions runs.",
+  "owner": {
+    "name": "Giulliano Macedo"
+  },
+  "plugins": [
+    {
+      "name": "whyredci",
+      "source": "./plugin",
+      "description": "Explain a failed GitHub Actions run, and whether it looks new, already failing or flaky. Read-only."
+    }
+  ]
+}

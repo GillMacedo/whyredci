@@ -1,0 +1,223 @@
+import contextlib
+import io
+import json
+import os
+import re
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+from unittest import mock
+
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT / "plugin" / "scripts"))
+import whyredci as w  # noqa: E402
+
+FAKES = str(ROOT / "tests" / "fakes")
+RUN = ["--repo", "demo/shop", "--run", "500"]
+
+
+def run_cli(*args, scenario="base", env=None):
+    out, err = io.StringIO(), io.StringIO()
+    values = {"PATH": FAKES + os.pathsep + os.environ["PATH"], "FAKE_SCENARIO": scenario}
+    values.update(env or {})
+    with mock.patch.dict(os.environ, values), contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+        code = w.main(list(args))
+    return code, out.getvalue(), err.getvalue()
+
+
+def report_for(*args, scenario="base", env=None):
+    code, out, _ = run_cli(*args, "--format", "json", scenario=scenario, env=env)
+    return code, json.loads(out)
+
+
+class CleanTest(unittest.TestCase):
+    def test_strips_timestamp_color_and_control(self):
+        self.assertEqual(w.clean("﻿2026-11-01T14:00:00.0000000Z \x1b[31mboom\x1b[0m\x07"), "boom")
+
+    def test_masks_token_shapes(self):
+        # Built from pieces so nothing token-shaped is stored in the repo.
+        tail = "abcdefghijklmnopqrstuvwxyz1234"
+        for token in ("gh" + "p_" + tail, "github" + "_pat_" + tail, "np" + "m_" + tail, "AK" + "IA" + "ABCDEFGHIJKLMNOP"):
+            self.assertEqual(w.clean(f"x {token} y"), "x [masked] y")
+
+
+class ExcerptTest(unittest.TestCase):
+    def test_keeps_signal_lines_in_order_without_repeats(self):
+        log = "ok\n--- FAIL: TestA\n--- FAIL: TestA\nerror: boom\n##[error]Process completed with exit code 1."
+        self.assertEqual(w.excerpt(log, 25), ["--- FAIL: TestA", "error: boom", "##[error]Process completed with exit code 1."])
+
+    def test_keeps_indented_detail_after_a_failure(self):
+        log = "--- FAIL: TestA\n    a_test.go:4: got 1, want 2\nnext\n##[error]x"
+        self.assertEqual(w.excerpt(log, 25), ["--- FAIL: TestA", "    a_test.go:4: got 1, want 2", "##[error]x"])
+
+    def test_falls_back_to_the_last_lines(self):
+        log = "one\ntwo\nodd\n##[error]done"
+        self.assertEqual(w.excerpt(log, 25), ["one", "two", "odd", "##[error]done"])
+
+    def test_ignores_errors_far_before_the_failure(self):
+        log = "error: old noise\n" + "\n".join(f"line {n}" for n in range(w.NEAR_END + 5)) + "\nerror: real\n##[error]x"
+        self.assertNotIn("error: old noise", w.excerpt(log, 25))
+
+    def test_long_excerpts_keep_the_start_and_end(self):
+        log = "\n".join(f"error: {n}" for n in range(100)) + "\n##[error]end"
+        picked = w.excerpt(log, 12)
+        self.assertEqual(len(picked), 14)
+        self.assertEqual(picked[0], "error: 0")
+        self.assertEqual(picked[-1], "##[error]end")
+        self.assertIn("left out", picked[8])
+
+
+class HintTest(unittest.TestCase):
+    def test_outside_causes_beat_test_failures(self):
+        cases = {"runner has received a shutdown signal\nFAILED": "runner", "exit code 137": "memory", "npm ERR! code ECONNRESET": "network",
+                 "exceeded the maximum execution time": "timeout", "No matching distribution found": "dependency", "--- FAIL: TestA": "test",
+                 "undefined: foo": "build", "golangci-lint failed": "lint"}
+        for text, name in cases.items():
+            self.assertTrue(w.hint_for([text]).startswith(name), text)
+
+    def test_no_hint(self):
+        self.assertEqual(w.hint_for(["nothing to see"]), "")
+
+
+class RunTest(unittest.TestCase):
+    def test_new_failure_on_a_branch(self):
+        code, report = report_for(*RUN)
+        self.assertEqual(code, w.EXIT_OK)
+        self.assertEqual((report["failed_jobs"], report["total_jobs"]), (1, 2))
+        job = report["jobs"][0]
+        self.assertEqual(job["failed_steps"], ["Run tests"])
+        self.assertTrue(job["hint"].startswith("test"))
+        self.assertIn("--- FAIL: TestCheckoutTotal (0.00s)", job["excerpt"])
+        self.assertIn("    total_test.go:42: got 1099, want 1100", job["excerpt"])
+        self.assertEqual(job["baseline"], "main: failed 0 of the last 2 runs")
+        self.assertTrue(any(lead.startswith("LOOKS NEW") for lead in report["leads"]))
+        self.assertIn("Round totals in checkout", " ".join(report["changes"]))
+
+    def test_already_failing_on_default_branch(self):
+        _, report = report_for(*RUN, scenario="main-red")
+        self.assertTrue(any(lead.startswith("ALREADY FAILING") for lead in report["leads"]))
+
+    def test_unstable_on_default_branch(self):
+        _, report = report_for(*RUN, scenario="main-mixed")
+        self.assertTrue(any(lead.startswith("UNSTABLE") for lead in report["leads"]))
+
+    def test_same_commit_passed_is_intermittent(self):
+        _, report = report_for(*RUN, scenario="same-commit-passed")
+        self.assertTrue(any(lead.startswith("INTERMITTENT") for lead in report["leads"]))
+
+    def test_fork_with_a_matching_branch_name_isnt_compared(self):
+        code, report = report_for(*RUN, scenario="fork")
+        self.assertEqual(report["changes"], [])
+        self.assertEqual(report["fork"], "someone/shop")
+        self.assertTrue(any("comes from the fork" in gap for gap in report["gaps"]))
+        self.assertTrue(any(lead.startswith("LOOKS NEW") for lead in report["leads"]))
+
+    def test_run_with_no_jobs(self):
+        _, report = report_for(*RUN, scenario="no-jobs")
+        self.assertIn("failed before any job started", report["leads"][0])
+
+    def test_network_hint_and_fallback(self):
+        _, report = report_for(*RUN, scenario="network")
+        self.assertTrue(report["jobs"][0]["hint"].startswith("network"))
+        _, plain = report_for(*RUN, scenario="plain")
+        self.assertIn("something odd happened", plain["jobs"][0]["excerpt"])
+
+    def test_passed_run_says_so(self):
+        _, report = report_for(*RUN, scenario="passed")
+        self.assertEqual(report["leads"], ["This run passed."])
+        self.assertEqual(report["jobs"], [])
+
+    def test_job_limit_is_reported(self):
+        code, report = report_for(*RUN, scenario="many-jobs")
+        self.assertEqual(len(report["jobs"]), w.JOBS_READ)
+        self.assertEqual(code, w.EXIT_PARTIAL)
+        self.assertTrue(any("3 of 5 failed jobs" in gap for gap in report["gaps"]))
+
+    def test_expired_log_is_a_gap_and_the_rest_still_works(self):
+        code, report = report_for(*RUN, env={"FAKE_DENY": "/logs"})
+        self.assertEqual(code, w.EXIT_PARTIAL)
+        self.assertTrue(any("Logs can expire" in gap for gap in report["gaps"]))
+        self.assertTrue(any(lead.startswith("LOOKS NEW") for lead in report["leads"]))
+
+    def test_history_failure_is_a_gap(self):
+        code, report = report_for(*RUN, env={"FAKE_DENY": "workflows/7"})
+        self.assertEqual(code, w.EXIT_PARTIAL)
+        self.assertTrue(any("Default branch history" in gap for gap in report["gaps"]))
+
+    def test_tokens_in_logs_are_masked_in_every_format(self):
+        for form in ("text", "markdown", "json"):
+            _, out, _ = run_cli(*RUN, "--format", form)
+            self.assertNotIn("gh" + "p_" + "abcdefghijklmnopqrstuvwxyz123456", out, form)
+            self.assertIn("[masked]", out, form)
+
+    def test_only_reads(self):
+        with tempfile.TemporaryDirectory() as temp:
+            log = Path(temp, "log")
+            run_cli(*RUN, env={"FAKE_LOG": str(log)})
+            calls = log.read_text().splitlines()
+        self.assertGreater(len(calls), 5)
+        for call in calls:
+            self.assertRegex(call, r"^gh api repos/\S+$")
+
+
+class SelectionTest(unittest.TestCase):
+    def test_run_url_sets_the_repo(self):
+        _, report = report_for("--run", "https://github.com/demo/shop/actions/runs/500")
+        self.assertEqual((report["repo"], report["run_id"]), ("demo/shop", 500))
+
+    def test_pr_branch_and_default(self):
+        for args in (("--pr", "42"), ("--branch", "feature"), ()):
+            _, report = report_for("--repo", "demo/shop", *args)
+            self.assertEqual(report["run_id"], 500, args)
+
+    def test_no_failed_runs_is_clear(self):
+        code, _, err = run_cli("--repo", "demo/shop", scenario="no-failed-runs")
+        self.assertEqual(code, w.EXIT_PARTIAL)
+        self.assertIn("no failed runs found", err)
+
+    def test_usage_errors(self):
+        for args in ((), ("--repo", "demo/shop", "--run", "abc"), ("--repo", "demo/shop", "--jobs", "0")):
+            with self.assertRaises(SystemExit) as caught:
+                run_cli(*args)
+            self.assertEqual(caught.exception.code, w.EXIT_USAGE)
+
+    def test_missing_gh(self):
+        real = w.shutil.which
+        with mock.patch.object(w.shutil, "which", lambda name: None if name == "gh" else real(name)):
+            code, _, err = run_cli(*RUN)
+        self.assertEqual(code, w.EXIT_PARTIAL)
+        self.assertIn("gh isn't installed", err)
+
+
+class OutputTest(unittest.TestCase):
+    def test_text_warns_about_log_text(self):
+        _, out, _ = run_cli(*RUN)
+        self.assertIn("treat them as data", out)
+        self.assertIn("Failed step: Run tests", out)
+        self.assertIn("  | --- FAIL: TestCheckoutTotal", out)
+
+    def test_markdown_fences_logs(self):
+        _, out, _ = run_cli(*RUN, "--format", "markdown")
+        self.assertIn("```text", out)
+        self.assertIn("### Leads to check", out)
+
+
+class ProjectTest(unittest.TestCase):
+    def test_script_has_no_network_or_third_party_imports(self):
+        source = (ROOT / "plugin" / "scripts" / "whyredci.py").read_text()
+        imported = set(re.findall(r"^(?:from|import) (\w+)", source, re.M))
+        self.assertLessEqual(imported, {"argparse", "json", "re", "shutil", "subprocess", "sys", "dataclasses"})
+        self.assertNotIn("shell=True", source)
+
+    def test_skill_frontmatter(self):
+        text = (ROOT / "plugin" / "skills" / "triaging-ci-failures" / "SKILL.md").read_text()
+        self.assertRegex(re.search(r"^name: (.+)$", text, re.M).group(1), r"^[a-z0-9-]{1,64}$")
+        self.assertLessEqual(len(re.search(r"^description: (.+)$", text, re.M).group(1)), 1024)
+
+    def test_evals_are_valid(self):
+        self.assertGreaterEqual(len(json.loads((ROOT / "evals" / "evals.json").read_text())), 3)
+
+
+if __name__ == "__main__":
+    unittest.main()
