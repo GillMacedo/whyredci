@@ -279,5 +279,51 @@ class ProjectTest(unittest.TestCase):
         self.assertGreaterEqual(len(json.loads((ROOT / "evals" / "evals.json").read_text())), 3)
 
 
+class ChangedFilesTest(unittest.TestCase):
+    def test_matches_full_paths_without_prefix_collisions_and_renders(self):
+        report = w.Report(repo="demo/shop", jobs=[w.Job(name="test", excerpt=[
+            "error: src/test.py:42 failed", "error: old-other.py failed",
+        ])])
+        with mock.patch.object(w, "gh_json", return_value=[
+            {"filename": "src/test.py"}, {"filename": "other.py"}, {"filename": "untouched.py"},
+        ]) as read:
+            w.add_changed_files(report, [20])
+        read.assert_called_once_with("repos/demo/shop/pulls/20/files?per_page=100&page=1")
+        self.assertEqual(report.jobs[0].changed_files, ["PR #20: src/test.py"])
+        self.assertIn("PR #20: src/test.py", w.render_text(report))
+        self.assertIn("PR #20: src/test.py", w.render_markdown(report))
+        self.assertEqual(json.loads(w.render_json(report))["jobs"][0]["changed_files"], ["PR #20: src/test.py"])
+
+    def test_reads_later_pages_and_reports_failed_reads(self):
+        report = w.Report(repo="demo/shop", jobs=[w.Job(name="test", excerpt=["error: later.py:1"])])
+        with mock.patch.object(w, "PAGE_SIZE", 2), mock.patch.object(w, "gh_json", side_effect=[
+            [{"filename": "a.py"}, {"filename": "b.py"}], [{"filename": "later.py"}], w.ReadError("forbidden"),
+        ]):
+            w.add_changed_files(report, [20, 21])
+        self.assertEqual(report.jobs[0].changed_files, ["PR #20: later.py"])
+        self.assertIn("PR #21 files: forbidden", report.gaps)
+
+    def test_stops_at_page_limit_with_a_gap(self):
+        report = w.Report(repo="demo/shop")
+        with mock.patch.object(w, "PR_FILE_PAGES", 1), mock.patch.object(w, "PAGE_SIZE", 1), mock.patch.object(w, "gh_json", return_value=[{"filename": "a.py"}]):
+            w.add_changed_files(report, [20])
+        self.assertTrue(any("file limit" in gap for gap in report.gaps))
+
+    def test_empty_pr_list_makes_no_requests(self):
+        with mock.patch.object(w, "gh_json") as read:
+            w.add_changed_files(w.Report(), [])
+        read.assert_not_called()
+
+    def test_cli_connects_run_pr_files_to_failed_job(self):
+        code, report = report_for(*RUN, scenario="changed_files")
+        self.assertEqual(code, w.EXIT_OK)
+        self.assertEqual(report["jobs"][0]["changed_files"], ["PR #20: total_test.go"])
+
+    def test_pr_run_without_association_reports_gap(self):
+        code, report = report_for(*RUN, scenario="no_pr_association")
+        self.assertEqual(code, w.EXIT_PARTIAL)
+        self.assertTrue(any("no pull request association" in gap for gap in report["gaps"]))
+
+
 if __name__ == "__main__":
     unittest.main()

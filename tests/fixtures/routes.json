@@ -13,7 +13,12 @@
    "head_sha": "ffffffffffffffffffffffffffffffffffffffff",
    "run_attempt": 1,
    "workflow_id": 7,
-   "html_url": "https://github.com/demo/shop/actions/runs/500"
+   "html_url": "https://github.com/demo/shop/actions/runs/500",
+   "pull_requests": [
+    {
+     "number": 20
+    }
+   ]
   },
   "repos/demo/shop/actions/runs/500/jobs?per_page=100&filter=latest": {
    "jobs": [
@@ -205,7 +210,8 @@
      "html_url": "https://github.com/demo/shop/actions/runs/500"
     }
    ]
-  }
+  },
+  "repos/demo/shop/pulls/20/files?per_page=100&page=1": []
  },
  "main-red": {
   "repos/demo/shop/actions/runs/490/jobs?per_page=100&filter=latest": {
@@ -311,7 +317,12 @@
    "head_sha": "ffffffffffffffffffffffffffffffffffffffff",
    "run_attempt": 1,
    "workflow_id": 7,
-   "html_url": "https://github.com/demo/shop/actions/runs/500"
+   "html_url": "https://github.com/demo/shop/actions/runs/500",
+   "pull_requests": [
+    {
+     "number": 20
+    }
+   ]
   }
  },
  "many-jobs": {
@@ -404,7 +415,37 @@
    "html_url": "https://github.com/demo/shop/actions/runs/500",
    "head_repository": {
     "full_name": "someone/shop"
+   },
+   "pull_requests": [
+    {
+     "number": 20
+    }
+   ]
+  }
+ },
+ "changed_files": {
+  "repos/demo/shop/pulls/20/files?per_page=100&page=1": [
+   {
+    "filename": "total_test.go"
+   },
+   {
+    "filename": "other.go"
    }
+  ]
+ },
+ "no_pr_association": {
+  "repos/demo/shop/actions/runs/500": {
+   "id": 500,
+   "name": "CI",
+   "conclusion": "failure",
+   "status": "completed",
+   "event": "pull_request",
+   "head_branch": "feature",
+   "head_sha": "ffffffffffffffffffffffffffffffffffffffff",
+   "run_attempt": 1,
+   "workflow_id": 7,
+   "html_url": "https://github.com/demo/shop/actions/runs/500",
+   "pull_requests": []
   }
  }
 }
