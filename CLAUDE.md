@@ -22,4 +22,4 @@ Claude Code skill and CLI that explains failed GitHub Actions runs.
 - Don't state a cause. Leads and hints are things to check.
 
 ## Definition of done
-`make test` and `make lint` pass, and `CHANGELOG.md`, `ROADMAP.md` and docs are updated when relevant.
+`make test` and `make lint` pass, and `ROADMAP.md` and docs are updated when relevant.
