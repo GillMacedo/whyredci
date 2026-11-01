@@ -1,6 +1,6 @@
 {
   "name": "whyredci",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Explain a failed GitHub Actions run: the failed step, the log lines that matter, and whether it looks new, already failing or flaky. Read-only.",
   "author": {
     "name": "Giulliano Macedo",

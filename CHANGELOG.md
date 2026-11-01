@@ -4,6 +4,8 @@ All notable changes are documented here, in [Keep a Changelog](https://keepachan
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-11-01
+
 ### Fixed
 - Read all job pages for large matrix runs and baseline comparisons, up to 10 pages; report incomplete reads instead of treating them as complete.
 
