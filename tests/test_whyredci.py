@@ -80,6 +80,48 @@ class HintTest(unittest.TestCase):
         self.assertEqual(w.hint_for(["nothing to see"]), "")
 
 
+class JobsTest(unittest.TestCase):
+    def test_reads_later_pages_and_stops_at_total(self):
+        first = [{"id": n} for n in range(w.PAGE_SIZE)]
+        last = {"id": 101, "conclusion": "failure"}
+        with mock.patch.object(w, "gh_json", side_effect=[
+            {"jobs": first, "total_count": 101},
+            {"jobs": [last], "total_count": 101},
+        ]) as read:
+            self.assertEqual(w.read_jobs("demo/shop", 500), first + [last])
+        self.assertEqual(read.call_args_list[-1], mock.call(
+            "repos/demo/shop/actions/runs/500/jobs?per_page=100&filter=latest&page=2"))
+
+    def test_empty_page_before_reported_total_is_an_error(self):
+        with mock.patch.object(w, "gh_json", return_value={"jobs": [], "total_count": 1}):
+            with self.assertRaisesRegex(w.ReadError, "ended before all 1 jobs"):
+                w.read_jobs("demo/shop", 500)
+
+    def test_exact_full_page_does_not_request_an_extra_page(self):
+        jobs = [{"id": n} for n in range(w.PAGE_SIZE)]
+        with mock.patch.object(w, "gh_json", return_value={"jobs": jobs, "total_count": w.PAGE_SIZE}) as read:
+            self.assertEqual(w.read_jobs("demo/shop", 500), jobs)
+            read.assert_called_once()
+
+    def test_short_page_without_total_remains_supported(self):
+        with mock.patch.object(w, "gh_json", return_value={"jobs": []}) as read:
+            self.assertEqual(w.read_jobs("demo/shop", 500), [])
+            read.assert_called_once()
+
+    def test_later_page_failure_is_not_returned_as_complete(self):
+        with mock.patch.object(w, "gh_json", side_effect=[
+            {"jobs": [{}] * w.PAGE_SIZE, "total_count": 101}, w.ReadError("HTTP 403")
+        ]):
+            with self.assertRaisesRegex(w.ReadError, "HTTP 403"):
+                w.read_jobs("demo/shop", 500)
+
+    def test_page_limit_reports_incomplete_jobs(self):
+        with mock.patch.object(w, "gh_json", return_value={"jobs": [{}] * w.PAGE_SIZE}) as read:
+            with self.assertRaisesRegex(w.ReadError, "job pages"):
+                w.read_jobs("demo/shop", 500)
+            self.assertEqual(read.call_count, 10)
+
+
 class RunTest(unittest.TestCase):
     def test_new_failure_on_a_branch(self):
         code, report = report_for(*RUN)
@@ -93,6 +135,24 @@ class RunTest(unittest.TestCase):
         self.assertEqual(job["baseline"], "main: failed 0 of the last 2 runs")
         self.assertTrue(any(lead.startswith("LOOKS NEW") for lead in report["leads"]))
         self.assertIn("Round totals in checkout", " ".join(report["changes"]))
+
+    def test_failures_on_later_pages_are_analyzed_and_compared(self):
+        real = w.gh_json
+
+        def paginated(path):
+            if "/jobs?" in path:
+                original = real(path.split("&page=")[0])["jobs"]
+                if "&page=2" in path:
+                    return {"jobs": original, "total_count": 100 + len(original)}
+                return {"jobs": [{"name": f"matrix-{n}", "conclusion": "success"} for n in range(100)],
+                        "total_count": 100 + len(original)}
+            return real(path)
+
+        with mock.patch.object(w, "gh_json", side_effect=paginated):
+            code, report = report_for(*RUN)
+        self.assertEqual(code, w.EXIT_OK)
+        self.assertEqual((report["total_jobs"], report["failed_jobs"]), (102, 1))
+        self.assertEqual(report["jobs"][0]["baseline"], "main: failed 0 of the last 2 runs")
 
     def test_already_failing_on_default_branch(self):
         _, report = report_for(*RUN, scenario="main-red")

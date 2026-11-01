@@ -12,8 +12,9 @@ from dataclasses import asdict, dataclass, field
 EXIT_OK, EXIT_PARTIAL, EXIT_USAGE = 0, 1, 2
 COMMAND_TIMEOUT = 120  # seconds; large job logs can take a while to download
 PAGE_SIZE = 100  # the most GitHub returns per page
+JOB_PAGES = 10  # bound job-list requests for large matrix runs
 JOBS_READ = 3  # a matrix often fails the same way, and each log is a large download
-BASELINE_RUNS = 5  # recent default branch runs checked job by job, one API call each
+BASELINE_RUNS = 5  # recent default branch runs checked job by job
 COMMITS_SHOWN = 10
 LINE_LIMIT = 220  # keeps one log line readable
 NEAR_END = 400  # log lines before the final error to search; earlier errors are often noise
@@ -172,7 +173,20 @@ def choose_run(args, report):
 
 
 def read_jobs(repo, run_id):
-    return gh_json(f"repos/{repo}/actions/runs/{run_id}/jobs?per_page={PAGE_SIZE}&filter=latest")["jobs"]
+    jobs = []
+    path = f"repos/{repo}/actions/runs/{run_id}/jobs?per_page={PAGE_SIZE}&filter=latest"
+    for page in range(1, JOB_PAGES + 1):
+        result = gh_json(path if page == 1 else f"{path}&page={page}")
+        batch = result["jobs"]
+        jobs.extend(batch)
+        total = result.get("total_count")
+        if total is not None and len(jobs) >= total:
+            return jobs
+        if total is None and len(batch) < PAGE_SIZE:
+            return jobs
+        if not batch:
+            raise ReadError(f"job list for run {run_id} ended before all {total} jobs were read")
+    raise ReadError(f"job pages for run {run_id} exceeded the {JOB_PAGES}-page limit")
 
 
 def baseline_for(report, default_branch, workflow_id):
