@@ -269,7 +269,25 @@ def analyze(args):
     if len(failed) > args.jobs:
         report.gaps.append(f"Read logs for {args.jobs} of {len(failed)} failed jobs. Use --jobs to read more.")
 
-    pull_numbers = [pr["number"] for pr in run.get("pull_requests", [])]
+    pull_numbers = []
+    associations = run.get("pull_requests") or []
+    if not isinstance(associations, list):
+        report.gaps.append("Malformed pull request associations; changed files could not be checked.")
+        associations = []
+    for pr in associations:
+        try:
+            number = pr["number"]
+            if type(number) is not int or number < 1:
+                raise ValueError("invalid PR number")
+            base_repo = pr["base"]["repo"]["full_name"]
+            if not isinstance(base_repo, str) or not base_repo:
+                raise ValueError("missing PR base repository")
+            if base_repo.lower() != repo.lower():
+                report.gaps.append(f"PR #{number} belongs to {clean(base_repo)}, not {repo}; its files were not checked.")
+                continue
+            pull_numbers.append(number)
+        except (AttributeError, KeyError, TypeError, ValueError):
+            report.gaps.append("Malformed pull request association; its changed files could not be checked.")
     if not pull_numbers and args.pr and not args.run:
         pull_numbers = [args.pr]
     if report.event.startswith("pull_request") and not pull_numbers:
@@ -280,15 +298,19 @@ def analyze(args):
 
 
 def add_changed_files(report, pull_numbers):
+    if not any(job.excerpt for job in report.jobs):
+        return
+    repo_name = re.escape(report.repo.rsplit("/", 1)[-1])
+    workspace = rf"(?:/home/runner/work/|/Users/runner/work/|/__w/|[A-Za-z]:/a/){repo_name}/{repo_name}/"
     for number in dict.fromkeys(pull_numbers):
         try:
             for page in range(1, PR_FILE_PAGES + 1):
                 files = gh_json(f"repos/{report.repo}/pulls/{number}/files?per_page={PAGE_SIZE}&page={page}")
                 for file in files:
                     filename = file["filename"]
-                    pattern = re.compile(r"(?<![\w.-])" + re.escape(filename) + r"(?![\w/.-])")
+                    pattern = re.compile(r"(?<![\w./\\-])(?:\./|" + workspace + r")?" + re.escape(filename) + r"(?![\w/\\-]|\.(?=[\w./\\-]))")
                     for job in report.jobs:
-                        if any(pattern.search(line) for line in job.excerpt):
+                        if any(pattern.search(line.replace("\\", "/")) for line in job.excerpt):
                             job.changed_files.append(f"PR #{number}: {clean(filename)}")
                 if len(files) < PAGE_SIZE:
                     break
@@ -389,7 +411,9 @@ def render_markdown(report):
             lines.append(f"- **History:** {job.baseline}")
         if job.changed_files:
             lines.append("- **Current PR files named in this excerpt:**")
-            lines.extend(f"  - {name}" for name in job.changed_files)
+            for name in job.changed_files:
+                fence = "`" * (max((len(run) for run in re.findall(r"`+", name)), default=0) + 1)
+                lines.append(f"  - {fence} {name} {fence}")
         if job.excerpt:
             lines += ["", "```text"] + [line.replace("```", "'''") for line in job.excerpt] + ["```"]
     if report.changes:

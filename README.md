@@ -78,7 +78,6 @@ Hints such as `network`, `memory` or `test` come from matching log text. They po
 ## Limits
 
 - PR file matches use repository-relative paths in the displayed log excerpts and the PR's current file list (up to GitHub's 3,000-file limit). They are leads, not proof of a cause or a snapshot of an older run.
-
 - GitHub Actions only.
 - History compares job names, so a renamed job or a job that only runs on PRs has no baseline.
 - It compares jobs, not individual tests, so a flaky test in a job that fails for other reasons won't stand out.

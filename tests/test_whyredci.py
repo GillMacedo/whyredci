@@ -294,6 +294,69 @@ class ChangedFilesTest(unittest.TestCase):
         self.assertIn("PR #20: src/test.py", w.render_markdown(report))
         self.assertEqual(json.loads(w.render_json(report))["jobs"][0]["changed_files"], ["PR #20: src/test.py"])
 
+    def test_path_boundaries_and_workspace_prefixes(self):
+        for line, matches in [
+            ("error: pkg/vendor/other.py:3", False),
+            ("error: ./other.py:3", True),
+            ("error: /home/runner/work/shop/shop/other.py:3", True),
+            ("error: /__w/shop/shop/other.py:3", True),
+            ("error: /Users/runner/work/shop/shop/other.py:3", True),
+            (r"error: D:\a\shop\shop\other.py:3", True),
+            ("error: /home/runner/work/shop/shop/pkg/other.py:3", False),
+            ("FAIL: see other.py.", True),
+            ("FAIL: see other.py.bak", False),
+            ("FAIL: see other.py/child", False),
+        ]:
+            with self.subTest(line=line):
+                report = w.Report(repo="demo/shop", jobs=[w.Job(name="test", excerpt=[line])])
+                with mock.patch.object(w, "gh_json", return_value=[{"filename": "other.py"}]):
+                    w.add_changed_files(report, [20])
+                self.assertEqual(bool(report.jobs[0].changed_files), matches)
+
+    def test_markdown_filenames_are_code_spans_even_with_backticks(self):
+        for filename in ("[click here](https://evil.example)", "a`b.py", "a``b.py"):
+            with self.subTest(filename=filename):
+                report = w.Report(repo="demo/shop", jobs=[w.Job(name="test", excerpt=[f"FAIL: {filename}"])])
+                with mock.patch.object(w, "gh_json", return_value=[{"filename": filename}]):
+                    w.add_changed_files(report, [20])
+                name = f"PR #20: {filename}"
+                longest = max((len(run) for run in re.findall(r"`+", name)), default=0)
+                fence = "`" * (longest + 1)
+                self.assertIn(f"  - {fence} {name} {fence}", w.render_markdown(report))
+
+    def test_bad_pr_associations_keep_excerpts_and_report_gaps(self):
+        for associations in (None, [None], [{}], [{"number": "20"}], [{"number": 20}],
+                             [{"number": 20, "base": {"repo": {"full_name": None}}}], {"number": 20},
+                             [{"number": 812, "base": {"repo": {"full_name": "upstream/shop"}}}]):
+            with self.subTest(associations=associations):
+                real = w.gh_json
+                paths = []
+                def response(path):
+                    paths.append(path)
+                    value = real(path)
+                    if path == "repos/demo/shop/actions/runs/500":
+                        value["pull_requests"] = associations
+                    return value
+                with mock.patch.object(w, "gh_json", side_effect=response):
+                    code, report = report_for(*RUN)
+                self.assertEqual(code, w.EXIT_PARTIAL)
+                self.assertTrue(report["jobs"][0]["excerpt"])
+                self.assertTrue(report["gaps"])
+                self.assertFalse(any("/files?" in path for path in paths))
+
+    def test_valid_pr_association_survives_a_malformed_neighbor(self):
+        real = w.gh_json
+        def response(path):
+            value = real(path)
+            if path == "repos/demo/shop/actions/runs/500":
+                value["pull_requests"] = [None, {"number": 20, "base": {"repo": {"full_name": "DEMO/SHOP"}}}]
+            return value
+        with mock.patch.object(w, "gh_json", side_effect=response):
+            code, report = report_for(*RUN, scenario="changed_files")
+        self.assertEqual(code, w.EXIT_PARTIAL)
+        self.assertEqual(report["jobs"][0]["changed_files"], ["PR #20: total_test.go"])
+        self.assertTrue(any("Malformed pull request association" in gap for gap in report["gaps"]))
+
     def test_reads_later_pages_and_reports_failed_reads(self):
         report = w.Report(repo="demo/shop", jobs=[w.Job(name="test", excerpt=["error: later.py:1"])])
         with mock.patch.object(w, "PAGE_SIZE", 2), mock.patch.object(w, "gh_json", side_effect=[
@@ -304,10 +367,15 @@ class ChangedFilesTest(unittest.TestCase):
         self.assertIn("PR #21 files: forbidden", report.gaps)
 
     def test_stops_at_page_limit_with_a_gap(self):
-        report = w.Report(repo="demo/shop")
+        report = w.Report(repo="demo/shop", jobs=[w.Job(name="test", excerpt=["error: a.py:1"])])
         with mock.patch.object(w, "PR_FILE_PAGES", 1), mock.patch.object(w, "PAGE_SIZE", 1), mock.patch.object(w, "gh_json", return_value=[{"filename": "a.py"}]):
             w.add_changed_files(report, [20])
         self.assertTrue(any("file limit" in gap for gap in report.gaps))
+
+    def test_empty_excerpts_make_no_file_requests(self):
+        with mock.patch.object(w, "gh_json") as read:
+            w.add_changed_files(w.Report(jobs=[w.Job(name="test")]), [20])
+        read.assert_not_called()
 
     def test_empty_pr_list_makes_no_requests(self):
         with mock.patch.object(w, "gh_json") as read:
