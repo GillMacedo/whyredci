@@ -12,6 +12,7 @@ from dataclasses import asdict, dataclass, field
 EXIT_OK, EXIT_PARTIAL, EXIT_USAGE = 0, 1, 2
 COMMAND_TIMEOUT = 120  # seconds; large job logs can take a while to download
 PAGE_SIZE = 100  # the most GitHub returns per page
+PR_FILE_PAGES = 30  # GitHub exposes at most 3,000 files per pull request
 JOB_PAGES = 10  # bound job-list requests for large matrix runs
 JOBS_READ = 3  # a matrix often fails the same way, and each log is a large download
 BASELINE_RUNS = 5  # recent default branch runs checked job by job
@@ -54,6 +55,7 @@ class Job:
     excerpt: list = field(default_factory=list)
     baseline: str = ""
     log_read: bool = False
+    changed_files: list = field(default_factory=list)
 
 
 @dataclass
@@ -267,8 +269,60 @@ def analyze(args):
     if len(failed) > args.jobs:
         report.gaps.append(f"Read logs for {args.jobs} of {len(failed)} failed jobs. Use --jobs to read more.")
 
+    pull_numbers = []
+    raw_associations = run.get("pull_requests")
+    associations = [] if raw_associations is None else raw_associations
+    if not isinstance(associations, list):
+        report.gaps.append("Malformed pull request associations; changed files could not be checked.")
+        associations = []
+    for pr in associations:
+        try:
+            number = pr["number"]
+            if type(number) is not int or number < 1:
+                raise ValueError("invalid PR number")
+            base_repo = pr["base"]["repo"]["full_name"]
+            if not isinstance(base_repo, str) or not base_repo:
+                raise ValueError("missing PR base repository")
+            if base_repo.lower() != repo.lower():
+                report.gaps.append(f"PR #{number} belongs to {clean(base_repo)}, not {repo}; its files were not checked.")
+                continue
+            pull_numbers.append(number)
+        except (AttributeError, KeyError, TypeError, ValueError):
+            report.gaps.append("Malformed pull request association; its changed files could not be checked.")
+    if not pull_numbers and args.pr and not args.run:
+        pull_numbers = [args.pr]
+    if report.event.startswith("pull_request") and raw_associations in (None, []) and not pull_numbers and any(job.excerpt for job in report.jobs):
+        report.gaps.append("This run has no pull request association, so changed files could not be checked.")
+    add_changed_files(report, pull_numbers)
     add_history_leads(report, repo, workflow_id)
     return report
+
+
+def add_changed_files(report, pull_numbers):
+    if not any(job.excerpt for job in report.jobs):
+        return
+    repo_name = "(?i:" + re.escape(report.repo.rsplit("/", 1)[-1]) + ")"
+    workspace = rf"(?:/home/runner/work/|/Users/runner/work/|/__w/|[A-Za-z]:/a/){repo_name}/{repo_name}/"
+    for number in dict.fromkeys(pull_numbers):
+        try:
+            for page in range(1, PR_FILE_PAGES + 1):
+                files = gh_json(f"repos/{report.repo}/pulls/{number}/files?per_page={PAGE_SIZE}&page={page}")
+                if not isinstance(files, list):
+                    raise ReadError("expected a list of changed files")
+                for file in files:
+                    if not isinstance(file, dict) or not isinstance(file.get("filename"), str) or not file["filename"]:
+                        raise ReadError("expected a nonempty filename in each changed file")
+                    filename = file["filename"]
+                    pattern = re.compile(r"(?<![\w./\\-])(?:\./|" + workspace + r")?" + re.escape(filename) + r"(?![\w/\\-]|\.(?=[\w./\\-]))")
+                    for job in report.jobs:
+                        if any(pattern.search(line.replace("\\", "/")) for line in job.excerpt):
+                            job.changed_files.append(f"PR #{number}: {clean(filename)}")
+                if len(files) < PAGE_SIZE:
+                    break
+            else:
+                report.gaps.append(f"PR #{number} reached the {PR_FILE_PAGES * PAGE_SIZE} file limit; more changed files may be omitted.")
+        except (ReadError, KeyError) as error:
+            report.gaps.append(f"PR #{number} files: {clean(error)}")
 
 
 def add_history_leads(report, repo, workflow_id):
@@ -333,6 +387,9 @@ def render_text(report):
             lines.append(f"  Hint: {job.hint}")
         if job.baseline:
             lines.append(f"  History: {job.baseline}")
+        if job.changed_files:
+            lines.append("  Current PR files named in this excerpt:")
+            lines.extend(f"    {name}" for name in job.changed_files)
         lines.extend(f"  | {line}" for line in job.excerpt)
     if report.changes:
         lines += ["", "Commits since this branch last passed (merges from the default branch add many):"]
@@ -357,6 +414,11 @@ def render_markdown(report):
             lines.append(f"- **Hint:** {job.hint}")
         if job.baseline:
             lines.append(f"- **History:** {job.baseline}")
+        if job.changed_files:
+            lines.append("- **Current PR files named in this excerpt:**")
+            for name in job.changed_files:
+                fence = "`" * (max((len(run) for run in re.findall(r"`+", name)), default=0) + 1)
+                lines.append(f"  - {fence} {name} {fence}")
         if job.excerpt:
             lines += ["", "```text"] + [line.replace("```", "'''") for line in job.excerpt] + ["```"]
     if report.changes:
