@@ -270,7 +270,8 @@ def analyze(args):
         report.gaps.append(f"Read logs for {args.jobs} of {len(failed)} failed jobs. Use --jobs to read more.")
 
     pull_numbers = []
-    associations = run.get("pull_requests") or []
+    raw_associations = run.get("pull_requests")
+    associations = [] if raw_associations is None else raw_associations
     if not isinstance(associations, list):
         report.gaps.append("Malformed pull request associations; changed files could not be checked.")
         associations = []
@@ -290,7 +291,7 @@ def analyze(args):
             report.gaps.append("Malformed pull request association; its changed files could not be checked.")
     if not pull_numbers and args.pr and not args.run:
         pull_numbers = [args.pr]
-    if report.event.startswith("pull_request") and not pull_numbers:
+    if report.event.startswith("pull_request") and raw_associations in (None, []) and not pull_numbers and any(job.excerpt for job in report.jobs):
         report.gaps.append("This run has no pull request association, so changed files could not be checked.")
     add_changed_files(report, pull_numbers)
     add_history_leads(report, repo, workflow_id)
@@ -300,13 +301,17 @@ def analyze(args):
 def add_changed_files(report, pull_numbers):
     if not any(job.excerpt for job in report.jobs):
         return
-    repo_name = re.escape(report.repo.rsplit("/", 1)[-1])
+    repo_name = "(?i:" + re.escape(report.repo.rsplit("/", 1)[-1]) + ")"
     workspace = rf"(?:/home/runner/work/|/Users/runner/work/|/__w/|[A-Za-z]:/a/){repo_name}/{repo_name}/"
     for number in dict.fromkeys(pull_numbers):
         try:
             for page in range(1, PR_FILE_PAGES + 1):
                 files = gh_json(f"repos/{report.repo}/pulls/{number}/files?per_page={PAGE_SIZE}&page={page}")
+                if not isinstance(files, list):
+                    raise ReadError("expected a list of changed files")
                 for file in files:
+                    if not isinstance(file, dict) or not isinstance(file.get("filename"), str) or not file["filename"]:
+                        raise ReadError("expected a nonempty filename in each changed file")
                     filename = file["filename"]
                     pattern = re.compile(r"(?<![\w./\\-])(?:\./|" + workspace + r")?" + re.escape(filename) + r"(?![\w/\\-]|\.(?=[\w./\\-]))")
                     for job in report.jobs:

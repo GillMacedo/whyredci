@@ -357,6 +357,51 @@ class ChangedFilesTest(unittest.TestCase):
         self.assertEqual(report["jobs"][0]["changed_files"], ["PR #20: total_test.go"])
         self.assertTrue(any("Malformed pull request association" in gap for gap in report["gaps"]))
 
+    def test_malformed_file_responses_keep_the_report(self):
+        for files in ({"message": "nope"}, None, ["a.py"], [{"filename": None}], [{"filename": ""}]):
+            with self.subTest(files=files):
+                real = w.gh_json
+                def response(path):
+                    return files if "/pulls/20/files?" in path else real(path)
+                with mock.patch.object(w, "gh_json", side_effect=response):
+                    code, report = report_for(*RUN, scenario="changed_files")
+                self.assertEqual(code, w.EXIT_PARTIAL)
+                self.assertTrue(report["jobs"][0]["excerpt"])
+                self.assertTrue(any("PR #20 files:" in gap for gap in report["gaps"]))
+
+    def test_workspace_repository_case_does_not_change_filename_case(self):
+        for filename, matches in (("src/x.py", True), ("src/X.py", False)):
+            with self.subTest(filename=filename):
+                report = w.Report(repo="demo/shop", jobs=[w.Job(name="test", excerpt=[
+                    "error: /home/runner/work/Shop/SHOP/src/x.py:1",
+                ])])
+                with mock.patch.object(w, "gh_json", return_value=[{"filename": filename}]):
+                    w.add_changed_files(report, [20])
+                self.assertEqual(bool(report.jobs[0].changed_files), matches)
+
+    def test_rejected_associations_do_not_claim_none_exist(self):
+        for associations in ([None], {}, "", False, {"number": 20}, [{"number": 812, "base": {"repo": {"full_name": "upstream/shop"}}}]):
+            with self.subTest(associations=associations):
+                real = w.gh_json
+                def response(path):
+                    value = real(path)
+                    if path == "repos/demo/shop/actions/runs/500":
+                        value["pull_requests"] = associations
+                    return value
+                with mock.patch.object(w, "gh_json", side_effect=response):
+                    code, report = report_for(*RUN)
+                self.assertEqual(code, w.EXIT_PARTIAL)
+                self.assertTrue(report["gaps"])
+                self.assertFalse(any("no pull request association" in gap for gap in report["gaps"]))
+
+    def test_empty_logs_do_not_need_a_pr_association(self):
+        real = w.gh_text
+        with mock.patch.object(w, "gh_text", side_effect=lambda path: "" if path.endswith("/logs") else real(path)):
+            code, report = report_for(*RUN, scenario="no_pr_association")
+        self.assertEqual(code, w.EXIT_OK)
+        self.assertEqual(report["jobs"][0]["excerpt"], [])
+        self.assertFalse(any("no pull request association" in gap for gap in report["gaps"]))
+
     def test_reads_later_pages_and_reports_failed_reads(self):
         report = w.Report(repo="demo/shop", jobs=[w.Job(name="test", excerpt=["error: later.py:1"])])
         with mock.patch.object(w, "PAGE_SIZE", 2), mock.patch.object(w, "gh_json", side_effect=[
