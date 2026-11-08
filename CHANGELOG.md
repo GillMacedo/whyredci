@@ -4,6 +4,8 @@ All notable changes are documented here, in [Keep a Changelog](https://keepachan
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-08
+
 ### Added
 - Show current PR files named in each failed job excerpt, with paginated reads and explicit gaps when files cannot be checked.
 
